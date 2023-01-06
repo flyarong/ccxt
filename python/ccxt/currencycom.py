@@ -27,7 +27,7 @@ class currencycom(Exchange):
             'name': 'Currency.com',
             'countries': ['BY'],  # Belarus
             'rateLimit': 100,
-            'certified': True,
+            'certified': False,
             'pro': True,
             'version': 'v2',
             # new metainfo interface
@@ -76,6 +76,7 @@ class currencycom(Exchange):
                 'fetchLedgerEntry': False,
                 'fetchLeverage': True,
                 'fetchLeverageTiers': False,
+                'fetchMarginMode': False,
                 'fetchMarkets': True,
                 'fetchMarkOHLCV': False,
                 'fetchMyTrades': True,
@@ -88,6 +89,7 @@ class currencycom(Exchange):
                 'fetchOrders': None,
                 'fetchOrderTrades': None,
                 'fetchPosition': None,
+                'fetchPositionMode': False,
                 'fetchPositions': True,
                 'fetchPositionsRisk': None,
                 'fetchPremiumIndexOHLCV': False,
@@ -353,7 +355,6 @@ class currencycom(Exchange):
             id = self.safe_string(currency, 'displaySymbol')
             code = self.safe_currency_code(id)
             fee = self.safe_number(currency, 'commissionFixed')
-            precision = self.safe_integer(currency, 'precision')
             result[code] = {
                 'id': id,
                 'code': code,
@@ -364,7 +365,7 @@ class currencycom(Exchange):
                 'deposit': None,
                 'withdraw': None,
                 'fee': fee,
-                'precision': precision,
+                'precision': self.parse_number(self.parse_precision(self.safe_string(currency, 'precision'))),
                 'limits': {
                     'amount': {
                         'min': None,
@@ -479,8 +480,8 @@ class currencycom(Exchange):
                 # https://github.com/ccxt/ccxt/issues/4286
                 # therefore limits['price']['max'] doesn't have any meaningful value except None
                 limitPriceMin = self.safe_number(filter, 'minPrice')
-                maxPrice = self.safe_number(filter, 'maxPrice')
-                if (maxPrice is not None) and (maxPrice > 0):
+                maxPrice = self.safe_string(filter, 'maxPrice')
+                if (maxPrice is not None) and (Precise.string_gt(maxPrice, '0')):
                     limitPriceMax = maxPrice
             precisionAmount = self.parse_number(self.parse_precision(self.safe_string(market, 'baseAssetPrecision')))
             limitAmount = {
@@ -548,7 +549,7 @@ class currencycom(Exchange):
                     'market': limitMarket,
                     'price': {
                         'min': limitPriceMin,
-                        'max': limitPriceMax,
+                        'max': self.parse_number(limitPriceMax),
                     },
                     'cost': {
                         'min': costMin,
@@ -560,6 +561,11 @@ class currencycom(Exchange):
         return result
 
     def fetch_accounts(self, params={}):
+        """
+        fetch all the accounts associated with a profile
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: a dictionary of `account structures <https://docs.ccxt.com/en/latest/manual.html#account-structure>` indexed by the account type
+        """
         response = self.privateGetV2Account(params)
         #
         #     {
@@ -608,6 +614,11 @@ class currencycom(Exchange):
         return result
 
     def fetch_trading_fees(self, params={}):
+        """
+        fetch the trading fees for multiple markets
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: a dictionary of `fee structures <https://docs.ccxt.com/en/latest/manual.html#fee-structure>` indexed by market symbols
+        """
         self.load_markets()
         response = self.privateGetV2Account(params)
         #
@@ -1149,6 +1160,7 @@ class currencycom(Exchange):
             'side': side,
             'price': price,
             'stopPrice': None,
+            'triggerPrice': None,
             'amount': amount,
             'cost': None,
             'average': None,
@@ -1201,6 +1213,16 @@ class currencycom(Exchange):
         return self.safe_string(statuses, status, status)
 
     def create_order(self, symbol, type, side, amount, price=None, params={}):
+        """
+        create a trade order
+        :param str symbol: unified symbol of the market to create an order in
+        :param str type: 'market' or 'limit'
+        :param str side: 'buy' or 'sell'
+        :param float amount: how much of currency you want to trade in units of base currency
+        :param float|None price: the price at which the order is to be fullfilled, in units of the quote currency, ignored in market orders
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: an `order structure <https://docs.ccxt.com/en/latest/manual.html#order-structure>`
+        """
         self.load_markets()
         market = self.market(symbol)
         accountId = None
@@ -1230,8 +1252,8 @@ class currencycom(Exchange):
                 request['type'] = 'STOP'
                 request['price'] = self.price_to_precision(symbol, price)
             elif type == 'market':
-                stopPrice = self.safe_number(params, 'stopPrice')
-                params = self.omit(params, 'stopPrice')
+                stopPrice = self.safe_value_2(params, 'triggerPrice', 'stopPrice')
+                params = self.omit(params, ['triggerPrice', 'stopPrice'])
                 if stopPrice is not None:
                     request['type'] = 'STOP'
                     request['price'] = self.price_to_precision(symbol, stopPrice)
@@ -1278,6 +1300,14 @@ class currencycom(Exchange):
         return self.parse_order(response, market)
 
     def fetch_open_orders(self, symbol=None, since=None, limit=None, params={}):
+        """
+        fetch all unfilled currently open orders
+        :param str|None symbol: unified market symbol
+        :param int|None since: the earliest time in ms to fetch open orders for
+        :param int|None limit: the maximum number of  open orders structures to retrieve
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns [dict]: a list of `order structures <https://docs.ccxt.com/en/latest/manual.html#order-structure>`
+        """
         self.load_markets()
         market = None
         request = {}
@@ -1312,6 +1342,13 @@ class currencycom(Exchange):
         return self.parse_orders(response, market, since, limit, params)
 
     def cancel_order(self, id, symbol=None, params={}):
+        """
+        cancels an open order
+        :param str id: order id
+        :param str symbol: unified symbol of the market the order was made in
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: An `order structure <https://docs.ccxt.com/en/latest/manual.html#order-structure>`
+        """
         if symbol is None:
             raise ArgumentsRequired(self.id + ' cancelOrder() requires a symbol argument')
         self.load_markets()
@@ -1343,6 +1380,14 @@ class currencycom(Exchange):
         return self.parse_order(response, market)
 
     def fetch_my_trades(self, symbol=None, since=None, limit=None, params={}):
+        """
+        fetch all trades made by the user
+        :param str symbol: unified market symbol
+        :param int|None since: the earliest time in ms to fetch trades for
+        :param int|None limit: the maximum number of trades structures to retrieve
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns [dict]: a list of `trade structures <https://docs.ccxt.com/en/latest/manual.html#trade-structure>`
+        """
         if symbol is None:
             raise ArgumentsRequired(self.id + ' fetchMyTrades() requires a symbol argument')
         self.load_markets()
@@ -1374,12 +1419,36 @@ class currencycom(Exchange):
         return self.parse_trades(response, market, since, limit)
 
     def fetch_deposits(self, code=None, since=None, limit=None, params={}):
+        """
+        fetch all deposits made to an account
+        :param str|None code: unified currency code
+        :param int|None since: the earliest time in ms to fetch deposits for
+        :param int|None limit: the maximum number of deposits structures to retrieve
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns [dict]: a list of `transaction structures <https://docs.ccxt.com/en/latest/manual.html#transaction-structure>`
+        """
         return self.fetch_transactions_by_method('privateGetV2Deposits', code, since, limit, params)
 
     def fetch_withdrawals(self, code=None, since=None, limit=None, params={}):
+        """
+        fetch all withdrawals made from an account
+        :param str|None code: unified currency code
+        :param int|None since: the earliest time in ms to fetch withdrawals for
+        :param int|None limit: the maximum number of withdrawals structures to retrieve
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns [dict]: a list of `transaction structures <https://docs.ccxt.com/en/latest/manual.html#transaction-structure>`
+        """
         return self.fetch_transactions_by_method('privateGetV2Withdrawals', code, since, limit, params)
 
     def fetch_transactions(self, code=None, since=None, limit=None, params={}):
+        """
+        fetch history of deposits and withdrawals
+        :param str|None code: unified currency code for the currency of the transactions, default is None
+        :param int|None since: timestamp in ms of the earliest transaction, default is None
+        :param int|None limit: max number of transactions to return, default is None
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: a list of `transaction structure <https://docs.ccxt.com/en/latest/manual.html#transaction-structure>`
+        """
         return self.fetch_transactions_by_method('privateGetV2Transactions', code, since, limit, params)
 
     def fetch_transactions_by_method(self, method, code=None, since=None, limit=None, params={}):
@@ -1394,56 +1463,70 @@ class currencycom(Exchange):
             request['limit'] = limit
         response = getattr(self, method)(self.extend(request, params))
         #
-        #     [
-        #       {
-        #         "id": "616769213",
-        #         "balance": "2.088",
-        #         "amount": "1.304",   # negative for 'withdrawal'
-        #         "currency": "CAKE",
-        #         "type": "deposit",
-        #         "timestamp": "1645282121023",
-        #         "paymentMethod": "BLOCKCHAIN",
-        #         "blockchainTransactionHash": "0x57c68c1f2ae74d5eda5a2a00516361d241a5c9e1ee95bf32573523857c38c112",
-        #         "status": "PROCESSED",
-        #         "commission": "0.14",  # self property only exists in withdrawal
-        #       },
-        #     ]
+        #    [
+        #        {
+        #            "id": "616769213",
+        #            "balance": "2.088",
+        #            "amount": "1.304",   # negative for 'withdrawal'
+        #            "currency": "CAKE",
+        #            "type": "deposit",
+        #            "timestamp": "1645282121023",
+        #            "paymentMethod": "BLOCKCHAIN",
+        #            "blockchainTransactionHash": "0x57c68c1f2ae74d5eda5a2a00516361d241a5c9e1ee95bf32573523857c38c112",
+        #            "status": "PROCESSED",
+        #            "commission": "0.14",  # self property only exists in withdrawal
+        #        },
+        #    ]
         #
         return self.parse_transactions(response, currency, since, limit, params)
 
     def parse_transaction(self, transaction, currency=None):
-        id = self.safe_string(transaction, 'id')
-        txHash = self.safe_string(transaction, 'blockchainTransactionHash')
-        amount = self.safe_number(transaction, 'amount')
+        #
+        #    {
+        #        "id": "616769213",
+        #        "balance": "2.088",
+        #        "amount": "1.304",   # negative for 'withdrawal'
+        #        "currency": "CAKE",
+        #        "type": "deposit",
+        #        "timestamp": "1645282121023",
+        #        "paymentMethod": "BLOCKCHAIN",
+        #        "blockchainTransactionHash": "0x57c68c1f2ae74d5eda5a2a00516361d241a5c9e1ee95bf32573523857c38c112",
+        #        "status": "PROCESSED",
+        #        "commission": "0.14",  # self property only exists in withdrawal
+        #    }
+        #
         timestamp = self.safe_integer(transaction, 'timestamp')
         currencyId = self.safe_string(transaction, 'currency')
         code = self.safe_currency_code(currencyId, currency)
-        state = self.parse_transaction_status(self.safe_string(transaction, 'state'))
-        type = self.parse_transaction_type(self.safe_string(transaction, 'type'))
         feeCost = self.safe_string(transaction, 'commission')
-        fee = None
+        fee = {
+            'currency': None,
+            'cost': None,
+            'rate': None,
+        }
         if feeCost is not None:
-            fee = {'currency': code, 'cost': feeCost}
+            fee['currency'] = code
+            fee['cost'] = feeCost
         result = {
-            'id': id,
-            'txid': txHash,
+            'info': transaction,
+            'id': self.safe_string(transaction, 'id'),
+            'txid': self.safe_string(transaction, 'blockchainTransactionHash'),
+            'type': self.parse_transaction_type(self.safe_string(transaction, 'type')),
+            'currency': code,
+            'network': None,
+            'amount': self.safe_number(transaction, 'amount'),
+            'status': self.parse_transaction_status(self.safe_string(transaction, 'state')),
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
-            'network': None,
-            'addressFrom': None,
             'address': None,
+            'addressFrom': None,
             'addressTo': None,
-            'tagFrom': None,
             'tag': None,
+            'tagFrom': None,
             'tagTo': None,
-            'type': type,
-            'amount': amount,
-            'currency': code,
-            'status': state,
             'updated': None,
             'comment': None,
             'fee': fee,
-            'info': transaction,
         }
         return result
 
@@ -1462,6 +1545,14 @@ class currencycom(Exchange):
         return self.safe_string(types, type, type)
 
     def fetch_ledger(self, code=None, since=None, limit=None, params={}):
+        """
+        fetch the history of changes, actions done by the user or operations that altered balance of the user
+        :param str|None code: unified currency code, default is None
+        :param int|None since: timestamp in ms of the earliest ledger entry, default is None
+        :param int|None limit: max number of ledger entrys to return, default is None
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: a `ledger structure <https://docs.ccxt.com/en/latest/manual.html#ledger-structure>`
+        """
         self.load_markets()
         request = {}
         currency = None
@@ -1549,6 +1640,12 @@ class currencycom(Exchange):
         return self.safe_string(types, type, type)
 
     def fetch_leverage(self, symbol, params={}):
+        """
+        fetch the set leverage for a market
+        :param str symbol: unified market symbol
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: a `leverage structure <https://docs.ccxt.com/en/latest/manual.html#leverage-structure>`
+        """
         self.load_markets()
         market = self.market(symbol)
         request = {
@@ -1564,6 +1661,12 @@ class currencycom(Exchange):
         return self.safe_number(response, 'value')
 
     def fetch_deposit_address(self, code, params={}):
+        """
+        fetch the deposit address for a currency associated with self account
+        :param str code: unified currency code
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns dict: an `address structure <https://docs.ccxt.com/en/latest/manual.html#address-structure>`
+        """
         self.load_markets()
         currency = self.currency(code)
         request = {
@@ -1616,6 +1719,12 @@ class currencycom(Exchange):
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
     def fetch_positions(self, symbols=None, params={}):
+        """
+        fetch all open positions
+        :param [str]|None symbols: list of unified market symbols
+        :param dict params: extra parameters specific to the currencycom api endpoint
+        :returns [dict]: a list of `position structure <https://docs.ccxt.com/en/latest/manual.html#position-structure>`
+        """
         self.load_markets()
         response = self.privateGetV2TradingPositions(params)
         #
@@ -1678,7 +1787,6 @@ class currencycom(Exchange):
             'leverage': leverage,
             'percentage': None,
             'marginMode': None,
-            'marginType': None,  # deprecated
             'notional': None,
             'markPrice': None,
             'liquidationPrice': None,
@@ -1688,6 +1796,7 @@ class currencycom(Exchange):
             'maintenanceMarginPercentage': None,
             'marginRatio': None,
             'info': position,
+            'id': None,
         }
 
     def handle_errors(self, httpCode, reason, url, method, headers, body, response, requestHeaders, requestBody):
